@@ -17,9 +17,15 @@ ExecStart=/opt/geniepod/bin/llama-server \
     --threads 4 \
     --parallel 1 \
     --flash-attn on \
-    --cache-type-k q4_0 \
-    --cache-type-v q4_0 \
     --no-warmup
+# NOTE: --cache-type-k / --cache-type-v q4_0 (or q8_0) would free another
+# ~500 MB of iGPU memory, but on llama.cpp + Phi-3/Phi-4 + flash-attn +
+# Tegra/aarch64 CUDA this combination currently crashes with
+# `GGML_ASSERT(ggml_is_contiguous(a)) failed` in ggml_reshape_2d via
+# llm_build_phi3::build_attn. Tracked upstream in llama.cpp; the
+# --ctx-size 2048 reduction alone (was 4096) is enough to ease the
+# iGPU eviction pressure that was slowing STT after long LLM responses
+# (see #2 for the full memory-budget math).
 
 Environment=GENIEPOD_LLM_MODEL=/opt/geniepod/models/phi-4-mini-instruct-q4_k_m.gguf
 Restart=on-failure
