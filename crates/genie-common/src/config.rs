@@ -556,6 +556,20 @@ pub struct Esp32C6UartConfig {
 pub struct ServiceEndpoint {
     pub url: String,
     pub systemd_unit: String,
+    /// LLM backend selector. Only meaningful for `services.llm`; defaults
+    /// preserve the legacy llama.cpp path for existing configs.
+    #[serde(default)]
+    pub backend: LlmBackendKind,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmBackendKind {
+    #[default]
+    #[serde(alias = "llama-cpp")]
+    LlamaCpp,
+    #[serde(alias = "genie-ai-runtime")]
+    GenieAiRuntime,
 }
 
 impl Config {
@@ -774,10 +788,12 @@ impl Default for ServicesConfig {
             core: ServiceEndpoint {
                 url: "http://127.0.0.1:3000/api/health".into(),
                 systemd_unit: "genie-core.service".into(),
+                backend: LlmBackendKind::default(),
             },
             llm: ServiceEndpoint {
                 url: "http://127.0.0.1:8080/health".into(),
                 systemd_unit: "genie-llm.service".into(),
+                backend: LlmBackendKind::LlamaCpp,
             },
             homeassistant: None,
             nextcloud: None,
@@ -900,6 +916,7 @@ bind_host = "0.0.0.0"
         config.services.nextcloud = Some(ServiceEndpoint {
             url: "http://127.0.0.1:8180/status.php".into(),
             systemd_unit: "nextcloud.service".into(),
+            backend: LlmBackendKind::default(),
         });
 
         assert!(config.manages_service_alias("genie-core"));
@@ -916,6 +933,7 @@ bind_host = "0.0.0.0"
         config.services.nextcloud = Some(ServiceEndpoint {
             url: "http://127.0.0.1:8180/status.php".into(),
             systemd_unit: "nextcloud.service".into(),
+            backend: LlmBackendKind::default(),
         });
 
         assert_eq!(
@@ -935,6 +953,33 @@ bind_host = "0.0.0.0"
             Some("nextcloud.service")
         );
         assert_eq!(config.service_unit_for_alias("jellyfin"), None);
+    }
+
+    #[test]
+    fn llm_service_backend_defaults_to_llama_cpp() {
+        let service: ServiceEndpoint = toml::from_str(
+            r#"
+url = "http://127.0.0.1:8080/health"
+systemd_unit = "genie-llm.service"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(service.backend, LlmBackendKind::LlamaCpp);
+    }
+
+    #[test]
+    fn llm_service_backend_accepts_genie_ai_runtime() {
+        let service: ServiceEndpoint = toml::from_str(
+            r#"
+url = "http://127.0.0.1:8080/health"
+systemd_unit = "genie-ai-runtime.service"
+backend = "genie_ai_runtime"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(service.backend, LlmBackendKind::GenieAiRuntime);
     }
 
     #[test]

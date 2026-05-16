@@ -41,8 +41,7 @@ pub struct VoiceOrchestrator {
 
 impl VoiceOrchestrator {
     pub async fn new(config: Config) -> Result<Self> {
-        let llm_url = &config.services.llm.url;
-        let llm = LlmClient::from_url(llm_url);
+        let llm = LlmClient::from_service_config(&config.services.llm);
 
         let ha = crate::ha::provider_from_config(&config);
         let skill_loader = crate::skills::load_all_with_policy(

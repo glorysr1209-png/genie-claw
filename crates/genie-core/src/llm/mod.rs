@@ -5,6 +5,7 @@ mod retry;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use genie_common::config::{LlmBackendKind, ServiceEndpoint};
 
 pub use genie_ai_runtime::GenieAiRuntimeBackend;
 pub use llama_cpp::LlamaCppBackend;
@@ -36,8 +37,7 @@ pub trait LlmBackendClient: Send + Sync {
 /// LLM client facade used by agent orchestration.
 ///
 /// The public constructors preserve the legacy llama.cpp default. Backend
-/// selection and config plumbing will be layered on top of this facade in a
-/// follow-up PR.
+/// selection from config is available through [`LlmClient::from_service_config`].
 pub struct LlmClient {
     backend: Box<dyn LlmBackendClient>,
 }
@@ -49,6 +49,13 @@ impl LlmClient {
 
     pub fn from_url(url: &str) -> Self {
         Self::from_llama_cpp_url(url)
+    }
+
+    pub fn from_service_config(service: &ServiceEndpoint) -> Self {
+        match service.backend {
+            LlmBackendKind::LlamaCpp => Self::from_llama_cpp_url(&service.url),
+            LlmBackendKind::GenieAiRuntime => Self::from_genie_ai_runtime_url(&service.url),
+        }
     }
 
     pub fn llama_cpp(host: &str, port: u16) -> Self {
@@ -131,6 +138,17 @@ mod tests {
     #[test]
     fn can_construct_genie_ai_runtime_client() {
         let client = LlmClient::from_genie_ai_runtime_url("http://127.0.0.1:8080/health");
+        assert_eq!(client.backend_name(), "genie-ai-runtime");
+    }
+
+    #[test]
+    fn service_config_selects_genie_ai_runtime_backend() {
+        let client = LlmClient::from_service_config(&ServiceEndpoint {
+            url: "http://127.0.0.1:8080/health".into(),
+            systemd_unit: "genie-ai-runtime.service".into(),
+            backend: LlmBackendKind::GenieAiRuntime,
+        });
+
         assert_eq!(client.backend_name(), "genie-ai-runtime");
     }
 }
