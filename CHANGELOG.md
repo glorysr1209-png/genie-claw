@@ -4,6 +4,41 @@
 
 ### Added
 
+- `voice` Cargo feature on `genie-core` and `genie-ctl` (issue #41).
+  Default-on so `cargo build` produces today's Jetson-targeted binary
+  unchanged. `cargo build -p genie-core --no-default-features` (and the
+  matching `-p genie-ctl`) produces a chat-only binary that drops the
+  STT/TTS/AEC/wakeword pipeline, the `VoiceOrchestrator`, the
+  `voice_loop::run` dispatcher, and `genie-ctl`'s `speaker` subcommand:
+    - `pub mod voice;` and `pub mod voice_loop;` in
+      `crates/genie-core/src/lib.rs` are now `#[cfg(feature = "voice")]`.
+    - The voice-mode branch in `crates/genie-core/src/main.rs` is gated;
+      when voice is requested (`--voice` / `GENIEPOD_VOICE=1` /
+      `core.voice_enabled = true`) on a chat-only build, the runtime
+      logs one warning and falls through to the existing chat / HTTP
+      path so deploying an unchanged `geniepod.toml` is a non-event.
+    - `genie-ctl`'s `genie-core` dependency uses
+      `default-features = false`; `genie-ctl`'s own new `voice` feature
+      forwards to `genie-core/voice`. The `speaker` subcommand,
+      `speaker` help line, all `cmd_speaker_*` helpers, and the two
+      `parse_speaker_options` unit tests are `#[cfg(feature = "voice")]`.
+      Invoking `genie-ctl speaker …` on a chat-only build exits with a
+      clear "rebuild with --features voice" message instead of crashing.
+  Knock-on cleanups so `cargo clippy -- -D warnings` is green on both
+  variants: `local_http_host` and its two unit tests in
+  `crates/genie-core/src/main.rs` are now `#[cfg(feature = "telegram")]`
+  (they are only used by the Telegram adapter and were latent dead code
+  on no-telegram builds); the `std::process::Command` import in
+  `crates/genie-ctl/src/main.rs` is `#[cfg(feature = "voice")]` because
+  the only `std::process::Command::new` call lives in `record_speaker_wav`.
+  Release binary on x86_64-linux drops from 4.8 MB to 4.6 MB without
+  voice; the bigger payoff is unblocking macOS / Windows hosts that
+  previously could not compile the ALSA-coupled voice modules.
+  CI matrix coverage (acceptance criterion #8) will be added on top of
+  issue #34's `ci.yml` workflow once that lands; the
+  `cargo build / clippy / test` invocations to add are
+  `-p genie-core -p genie-ctl --no-default-features` next to the
+  existing `--workspace` ones.
 - `.github/workflows/scripts.yml` and `ruff.toml` — shellcheck + ruff
   workflow for the stretch slice of issue #34. Discovers all
   tracked `*.sh` and `*.py` files via `git ls-files`, then runs

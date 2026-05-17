@@ -24,7 +24,7 @@
 //! | [`connectivity`] | Boundary for an ESP32-C6 UART Thread/Matter coprocessor |
 //! | [`context`] | LLM context window management with summarization |
 //! | [`prompt`] | Model-aware system prompt builder (6 LLM families) |
-//! | [`voice`] | STT/TTS subprocess management + voice output formatter |
+//! | [`voice`] | STT/TTS subprocess management + voice output formatter (feature `voice`, default-on) |
 //! | [`ota`] | OTA update checker via GitHub Releases |
 //! | [`server`] | HTTP chat API server |
 //!
@@ -58,7 +58,9 @@ pub mod skills;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 pub mod tools;
+#[cfg(feature = "voice")]
 pub mod voice;
+#[cfg(feature = "voice")]
 pub mod voice_loop;
 
 // Re-export key types at crate root for convenience.
