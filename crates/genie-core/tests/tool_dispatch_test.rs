@@ -115,37 +115,164 @@ fn setup_script_warns_about_missing_audio_helper() {
     );
 }
 
-/// Verify the Jetson restart helper script is syntactically valid.
+/// Verify LLM backend auto-fallback can patch a root-owned config and fails loudly.
 #[test]
-fn jetson_restart_script_is_valid_shell() {
-    let path = workspace_root().join("deploy/scripts/genie-restart-all.sh");
-    assert!(path.exists(), "restart helper script should exist");
-
-    let output = std::process::Command::new("bash")
-        .args(["-n", path.to_str().unwrap()])
-        .output()
-        .expect("failed to run bash -n");
+fn setup_script_privileged_llm_backend_patch_is_checked() {
+    let path = workspace_root().join("deploy/setup-jetson.sh");
+    let contents = std::fs::read_to_string(&path).unwrap();
 
     assert!(
-        output.status.success(),
-        "restart helper script has invalid shell syntax: {}",
-        String::from_utf8_lossy(&output.stderr)
+        contents.contains("CONFIGURED_BACKEND=\"$(sudo awk"),
+        "setup script should read the configured LLM backend through sudo"
+    );
+    assert!(
+        contents.contains("if ! sudo awk -v nb=\"$new_backend\" -v nu=\"$new_unit\""),
+        "setup script should read the chmod 600 root-owned config through sudo"
+    );
+    assert!(
+        contents.contains("sudo mktemp /tmp/geniepod.toml."),
+        "setup script should create a root-owned temp file for the patched config"
+    );
+    assert!(
+        contents.contains("ERROR: failed to rewrite $cfg for patching"),
+        "setup script should report failed config rewrites"
+    );
+    assert!(
+        contents.contains("| sudo tee \"$tmp\" > /dev/null"),
+        "setup script should write the patched temp file through sudo tee"
+    );
+    assert!(
+        contents.contains("ERROR: failed to install patched $cfg"),
+        "setup script should report failed config installs"
+    );
+    assert!(
+        contents.contains("sudo rm -f \"$tmp\""),
+        "setup script should clean up the root-owned temp file through sudo"
+    );
+    assert!(
+        contents.contains("Installing genie-ai-runtime now; this is the default backend"),
+        "setup script should install the default runtime during normal setup"
+    );
+    assert!(
+        contents.contains("Downloading prebuilt runtime assets"),
+        "setup script should download the default runtime from release assets"
+    );
+    assert!(
+        contents.contains("SHA256SUMS"),
+        "setup script should download release checksums"
+    );
+    assert!(
+        contents.contains("sha256sum -c"),
+        "setup script should verify downloaded runtime checksums"
+    );
+    assert!(
+        contents.contains("jetson-llm-server-v1.0.0-aarch64-unknown-linux-gnu"),
+        "setup script should document the required server release asset"
+    );
+    assert!(
+        !contents.contains("git clone --branch \"$tag\""),
+        "setup script should not clone the runtime repo during normal install"
+    );
+    assert!(
+        !contents.contains("cmake --build build"),
+        "setup script should not build the runtime from source during setup"
+    );
+    assert!(
+        !contents.contains("Auto-falling back to llama.cpp"),
+        "setup script should not silently downgrade the default backend to llama.cpp"
+    );
+    assert!(
+        contents.contains(
+            "if ! patch_services_llm_backend \"genie_ai_runtime\" \"genie-ai-runtime.service\""
+        ),
+        "genie-ai-runtime selection should check patch failure"
+    );
+    assert!(
+        contents
+            .contains("auto-fallback could not patch $CONFIG_DIR/geniepod.toml; aborting setup"),
+        "setup should abort instead of enabling services against an unpatched config"
     );
 }
 
-/// Verify the deploy pipeline copies the Jetson restart helper script.
+/// Verify the Jetson lifecycle helper scripts are syntactically valid.
 #[test]
-fn makefile_deploys_restart_helper() {
+fn jetson_lifecycle_scripts_are_valid_shell() {
+    for script in [
+        "deploy/scripts/genie-restart-all.sh",
+        "deploy/scripts/start_all.sh",
+        "deploy/scripts/stop_all.sh",
+    ] {
+        let path = workspace_root().join(script);
+        assert!(path.exists(), "{script} should exist");
+
+        let output = std::process::Command::new("bash")
+            .args(["-n", path.to_str().unwrap()])
+            .output()
+            .expect("failed to run bash -n");
+
+        assert!(
+            output.status.success(),
+            "{script} has invalid shell syntax: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// Verify the deploy pipeline copies the Jetson lifecycle helper scripts.
+#[test]
+fn makefile_deploys_lifecycle_helpers() {
+    let path = workspace_root().join("Makefile");
+    let contents = std::fs::read_to_string(&path).unwrap();
+
+    for script in ["genie-restart-all.sh", "start_all.sh", "stop_all.sh"] {
+        assert!(
+            contents.contains(&format!("deploy/scripts/{script}")),
+            "Makefile should copy {script} during deploy"
+        );
+        assert!(
+            contents.contains(&format!("$(INSTALL_DIR)/bin/{script}")),
+            "Makefile should install {script} into /opt/geniepod/bin"
+        );
+    }
+}
+
+/// Verify start_all follows the configured backend instead of starting both LLMs.
+#[test]
+fn start_all_uses_configured_llm_backend() {
+    let path = workspace_root().join("deploy/scripts/start_all.sh");
+    let contents = std::fs::read_to_string(&path).unwrap();
+
+    assert!(
+        contents.contains("Configured LLM unit"),
+        "start_all should report the selected LLM unit"
+    );
+    assert!(
+        contents.contains("read_llm_unit"),
+        "start_all should read [services.llm].systemd_unit"
+    );
+    assert!(
+        contents.contains("other_llm_units_for"),
+        "start_all should stop the non-selected LLM backend before starting"
+    );
+    assert!(
+        contents.contains("is_warmup_unit") && contents.contains("start --no-block"),
+        "start_all should queue warmup units without blocking the lifecycle script"
+    );
+}
+
+/// Verify systemd deploy replaces stale or masked unit-file symlinks.
+#[test]
+fn makefile_installs_systemd_units_instead_of_copying_through_symlinks() {
     let path = workspace_root().join("Makefile");
     let contents = std::fs::read_to_string(&path).unwrap();
 
     assert!(
-        contents.contains("deploy/scripts/genie-restart-all.sh"),
-        "Makefile should copy the restart helper script during deploy"
+        contents.contains("sudo install -m 0644 \"$$unit\""),
+        "Makefile should replace stale/masked unit files instead of copying through symlinks"
     );
     assert!(
-        contents.contains("$(INSTALL_DIR)/bin/genie-restart-all.sh"),
-        "Makefile should install the restart helper into /opt/geniepod/bin"
+        !contents.contains("sudo cp /tmp/genie-*.service"),
+        "Makefile should not use cp for systemd units; cp follows masked-unit symlinks"
     );
 }
 
