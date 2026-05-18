@@ -122,7 +122,7 @@ impl RequestProfile {
             });
         }
 
-        let compacted_messages = self.compact_messages(messages);
+        let compacted_messages = self.compact_messages(messages, GENIE_RUNTIME_MAX_BODY_BYTES);
         let compacted_body =
             self.serialize_body(&compacted_messages, max_tokens, stream, response_format)?;
         Ok(PreparedChatBody {
@@ -164,15 +164,16 @@ impl RequestProfile {
         }
     }
 
-    fn compact_messages(&self, messages: &[Message]) -> Vec<Message> {
+    fn compact_messages(&self, messages: &[Message], max_body_bytes: usize) -> Vec<Message> {
         match self {
             Self::Generic => messages.to_vec(),
-            Self::GenieAiRuntime => compact_genie_runtime_messages(messages),
+            Self::GenieAiRuntime => compact_genie_runtime_messages(messages, max_body_bytes),
         }
     }
 }
 
-const GENIE_RUNTIME_MAX_BODY_BYTES: usize = 4 * 1024;
+const GENIE_RUNTIME_MAX_BODY_BYTES: usize = 24 * 1024;
+const GENIE_RUNTIME_BODY_OVERHEAD_BYTES: usize = 768;
 const GENIE_RUNTIME_COMPACT_SYSTEM: &str =
     "You are GeniePod Home. Answer the user's latest request directly and concisely.";
 
@@ -507,20 +508,65 @@ fn parse_status_line(line: &str) -> u16 {
         .unwrap_or(0)
 }
 
-fn compact_genie_runtime_messages(messages: &[Message]) -> Vec<Message> {
-    let Some(message) = messages
+fn compact_genie_runtime_messages(messages: &[Message], max_body_bytes: usize) -> Vec<Message> {
+    let system_messages = messages
         .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .or_else(|| messages.iter().rev().find(|m| m.role != "system"))
+        .filter(|m| m.role == "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_system_context = !system_messages.is_empty();
+
+    let Some(latest_idx) = messages
+        .iter()
+        .rposition(|m| m.role == "user")
+        .or_else(|| messages.iter().rposition(|m| m.role != "system"))
     else {
-        return Vec::new();
+        return system_messages;
     };
 
-    vec![Message {
+    let latest_source = &messages[latest_idx];
+    let latest = Message {
         role: "user".into(),
-        content: format!("{}\n\n{}", GENIE_RUNTIME_COMPACT_SYSTEM, message.content),
-    }]
+        content: if has_system_context {
+            latest_source.content.clone()
+        } else {
+            format!(
+                "{}\n\n{}",
+                GENIE_RUNTIME_COMPACT_SYSTEM, latest_source.content
+            )
+        },
+    };
+
+    let mut compacted = system_messages;
+    let body_budget = max_body_bytes.saturating_sub(GENIE_RUNTIME_BODY_OVERHEAD_BYTES);
+    let mut estimated_bytes = estimate_messages_bytes(&compacted) + estimate_message_bytes(&latest);
+    let mut retained_history = Vec::new();
+
+    for message in messages[..latest_idx]
+        .iter()
+        .rev()
+        .filter(|m| m.role != "system")
+    {
+        let message_bytes = estimate_message_bytes(message);
+        if estimated_bytes + message_bytes > body_budget {
+            break;
+        }
+        retained_history.push(message.clone());
+        estimated_bytes += message_bytes;
+    }
+
+    retained_history.reverse();
+    compacted.extend(retained_history);
+    compacted.push(latest);
+    compacted
+}
+
+fn estimate_messages_bytes(messages: &[Message]) -> usize {
+    messages.iter().map(estimate_message_bytes).sum()
+}
+
+fn estimate_message_bytes(message: &Message) -> usize {
+    message.role.len() + message.content.len() + 32
 }
 
 fn should_retry_without_system_role(messages: &[Message], err: &str) -> bool {
@@ -664,11 +710,11 @@ mod tests {
         let messages = vec![
             Message {
                 role: "system".into(),
-                content: "large tool manifest ".repeat(1_000),
+                content: "tool manifest memory_recall household context ".repeat(128),
             },
             Message {
                 role: "assistant".into(),
-                content: "older assistant turn ".repeat(200),
+                content: "older assistant turn ".repeat(2_000),
             },
             Message {
                 role: "user".into(),
@@ -685,13 +731,41 @@ mod tests {
         assert!(prepared.compacted);
         assert_eq!(json["model"], "jetson-llm");
         assert_eq!(json["think"], false);
-        assert_eq!(json["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(json["messages"][0]["role"], "user");
-        assert!(serialized_messages.contains("GeniePod Home"));
+        assert_eq!(json["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert!(serialized_messages.contains("memory_recall"));
+        assert!(serialized_messages.contains("household context"));
         assert!(serialized_messages.contains("Say hello from the GeniePod web UI."));
-        assert!(!serialized_messages.contains("large tool manifest"));
+        assert!(!serialized_messages.contains("GeniePod Home"));
         assert!(!serialized_messages.contains("older assistant turn"));
-        assert!(prepared.body.len() < 1_000);
+        assert!(prepared.body.len() < GENIE_RUNTIME_MAX_BODY_BYTES);
+    }
+
+    #[test]
+    fn genie_runtime_profile_keeps_runtime_prompt_under_expanded_budget() {
+        let profile = RequestProfile::genie_ai_runtime();
+        let messages = vec![
+            Message {
+                role: "system".into(),
+                content: "memory_recall tool manifest household preference ".repeat(160),
+            },
+            Message {
+                role: "user".into(),
+                content: "What is my name?".into(),
+            },
+        ];
+
+        let prepared = profile
+            .prepare_body(&messages, Some(64), false, None)
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&prepared.body).unwrap();
+        let serialized_messages = json["messages"].to_string();
+
+        assert!(!prepared.compacted);
+        assert!(prepared.body.len() > 4 * 1024);
+        assert!(prepared.body.len() < GENIE_RUNTIME_MAX_BODY_BYTES);
+        assert!(serialized_messages.contains("memory_recall"));
+        assert!(serialized_messages.contains("What is my name?"));
     }
 
     #[test]
@@ -707,10 +781,11 @@ mod tests {
             },
         ];
 
-        let compacted = compact_genie_runtime_messages(&messages);
-        assert_eq!(compacted.len(), 1);
-        assert_eq!(compacted[0].role, "user");
-        assert!(compacted[0].content.contains("assistant fallback"));
+        let compacted = compact_genie_runtime_messages(&messages, GENIE_RUNTIME_MAX_BODY_BYTES);
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].role, "system");
+        assert_eq!(compacted[1].role, "user");
+        assert!(compacted[1].content.contains("assistant fallback"));
     }
 
     #[test]
