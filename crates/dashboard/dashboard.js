@@ -150,6 +150,13 @@ function serviceStatus(s) {
   return { label: s.error || 'Unknown', color: 'var(--red)', dot: 'dot-down' };
 }
 
+function serviceLatency(s) {
+  if (s.latency_source === 'not_applicable') return 'n/a';
+  if (s.response_ms == null) return '--';
+  const suffix = s.latency_source === 'live' ? ' live' : '';
+  return `${s.response_ms}ms${suffix}`;
+}
+
 async function pollServices() {
   const data = await fetchJson('/api/services');
   const tbody = document.getElementById('services-body');
@@ -162,7 +169,7 @@ async function pollServices() {
 
   tbody.innerHTML = data.map(s => {
     const status = serviceStatus(s);
-    const latency = s.response_ms == null ? '--' : `${s.response_ms}ms`;
+    const latency = serviceLatency(s);
     const detail = s.unit ? `<div class="small">${escapeHtml(s.unit)}</div>` : '';
     return `<tr>
       <td><span class="dot ${status.dot}"></span>${escapeHtml(s.service)}${detail}</td>

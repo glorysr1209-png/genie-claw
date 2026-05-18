@@ -2,6 +2,10 @@ use genie_common::config::Config;
 use genie_common::tegrastats;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+use std::time::Instant;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::process::Command;
 
 use crate::http::Response;
@@ -96,6 +100,7 @@ pub async fn get_tegrastats(config: &Config) -> Response {
 struct ServiceTarget {
     service: String,
     unit: String,
+    latency_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +109,13 @@ struct HealthRow {
     response_ms: i64,
     error: Option<String>,
     last_check: i64,
+}
+
+#[derive(Debug, Clone)]
+struct LiveLatencyRow {
+    healthy: bool,
+    response_ms: i64,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,6 +134,7 @@ struct ServiceRow {
     unit: String,
     healthy: bool,
     response_ms: Option<i64>,
+    latency_source: &'static str,
     error: Option<String>,
     last_check: Option<i64>,
     source: &'static str,
@@ -137,13 +150,14 @@ pub async fn get_services(config: &Config) -> Response {
     let db_path = config.data_dir.join("health.db");
     let targets = dashboard_service_targets(config);
     let health = read_latest_health_rows(db_path).await.unwrap_or_default();
+    let live_latency = collect_live_latency_rows(&targets, &health).await;
     let mut systemd = BTreeMap::new();
 
     for unit in unique_units(&targets) {
         systemd.insert(unit.clone(), query_systemd_unit(&unit).await);
     }
 
-    let rows = merge_service_rows(&targets, &health, &systemd);
+    let rows = merge_service_rows(&targets, &health, &live_latency, &systemd);
     let body = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into());
 
     Response {
@@ -210,38 +224,47 @@ fn dashboard_service_targets(config: &Config) -> Vec<ServiceTarget> {
         ServiceTarget {
             service: "core".into(),
             unit: config.services.core.systemd_unit.clone(),
+            latency_url: Some(config.services.core.url.clone()),
         },
         ServiceTarget {
             service: "llm".into(),
             unit: config.services.llm.systemd_unit.clone(),
+            latency_url: Some(config.services.llm.url.clone()),
         },
         ServiceTarget {
             service: "api".into(),
             unit: "genie-api.service".into(),
+            latency_url: Some("http://127.0.0.1:3080/api/status".into()),
         },
         ServiceTarget {
             service: "health".into(),
             unit: "genie-health.service".into(),
+            latency_url: None,
         },
         ServiceTarget {
             service: "governor".into(),
             unit: "genie-governor.service".into(),
+            latency_url: None,
         },
         ServiceTarget {
             service: "mqtt".into(),
             unit: "genie-mqtt.service".into(),
+            latency_url: None,
         },
         ServiceTarget {
             service: "audio".into(),
             unit: "genie-audio.service".into(),
+            latency_url: None,
         },
         ServiceTarget {
             service: "whisper".into(),
             unit: "genie-whisper.service".into(),
+            latency_url: None,
         },
         ServiceTarget {
             service: "wakeword".into(),
             unit: "genie-wakeword.service".into(),
+            latency_url: None,
         },
         ServiceTarget {
             service: "homeassistant".into(),
@@ -251,6 +274,11 @@ fn dashboard_service_targets(config: &Config) -> Vec<ServiceTarget> {
                 .as_ref()
                 .map(|service| service.systemd_unit.clone())
                 .unwrap_or_else(|| "homeassistant.service".into()),
+            latency_url: config
+                .services
+                .homeassistant
+                .as_ref()
+                .map(|service| service.url.clone()),
         },
     ];
 
@@ -258,12 +286,14 @@ fn dashboard_service_targets(config: &Config) -> Vec<ServiceTarget> {
         targets.push(ServiceTarget {
             service: "nextcloud".into(),
             unit: nextcloud.systemd_unit.clone(),
+            latency_url: Some(nextcloud.url.clone()),
         });
     }
     if let Some(jellyfin) = &config.services.jellyfin {
         targets.push(ServiceTarget {
             service: "jellyfin".into(),
             unit: jellyfin.systemd_unit.clone(),
+            latency_url: Some(jellyfin.url.clone()),
         });
     }
 
@@ -282,12 +312,14 @@ fn unique_units(targets: &[ServiceTarget]) -> Vec<String> {
 fn merge_service_rows(
     targets: &[ServiceTarget],
     health: &BTreeMap<String, HealthRow>,
+    live_latency: &BTreeMap<String, LiveLatencyRow>,
     systemd: &BTreeMap<String, SystemdRow>,
 ) -> Vec<ServiceRow> {
     targets
         .iter()
         .map(|target| {
             let health_row = health.get(&target.service);
+            let live_row = live_latency.get(&target.service);
             let systemd_row = systemd
                 .get(&target.unit)
                 .cloned()
@@ -297,23 +329,37 @@ fn merge_service_rows(
                 });
             let systemd_active = systemd_row.active_state == "active";
             let missing = systemd_row.load_state == "not-found";
-            let healthy =
-                !missing && systemd_active && health_row.map(|row| row.healthy).unwrap_or(true);
-            let error = health_row
+            let endpoint_healthy = health_row
+                .map(|row| row.healthy)
+                .or_else(|| live_row.map(|row| row.healthy))
+                .unwrap_or(true);
+            let healthy = !missing && systemd_active && endpoint_healthy;
+            let endpoint_error = health_row
                 .and_then(|row| row.error.clone())
-                .or_else(|| systemd_row.error.clone())
+                .or_else(|| live_row.and_then(|row| row.error.clone()));
+            let systemd_error = systemd_row
+                .error
+                .clone()
                 .or_else(|| service_state_error(&systemd_row));
-            let source = if health_row.is_some() {
-                "health+systemd"
+            let error = if missing || !systemd_active {
+                systemd_error.or(endpoint_error)
             } else {
-                "systemd"
+                endpoint_error.or(systemd_error)
+            };
+            let (response_ms, latency_source, source) = if let Some(row) = health_row {
+                (Some(row.response_ms), "health", "health+systemd")
+            } else if let Some(row) = live_row {
+                (Some(row.response_ms), "live", "live+systemd")
+            } else {
+                (None, "not_applicable", "systemd")
             };
 
             ServiceRow {
                 service: target.service.clone(),
                 unit: target.unit.clone(),
                 healthy,
-                response_ms: health_row.map(|row| row.response_ms),
+                response_ms,
+                latency_source,
                 error,
                 last_check: health_row.map(|row| row.last_check),
                 source,
@@ -325,6 +371,75 @@ fn merge_service_rows(
             }
         })
         .collect()
+}
+
+async fn collect_live_latency_rows(
+    targets: &[ServiceTarget],
+    health: &BTreeMap<String, HealthRow>,
+) -> BTreeMap<String, LiveLatencyRow> {
+    let mut rows = BTreeMap::new();
+
+    for target in targets {
+        if health.contains_key(&target.service) {
+            continue;
+        }
+        let Some(url) = target.latency_url.as_deref() else {
+            continue;
+        };
+        rows.insert(target.service.clone(), probe_http_latency(url).await);
+    }
+
+    rows
+}
+
+async fn probe_http_latency(url: &str) -> LiveLatencyRow {
+    let start = Instant::now();
+    let result = async {
+        let url = url.strip_prefix("http://").unwrap_or(url);
+        let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
+        let path = format!("/{path}");
+
+        let mut stream =
+            tokio::time::timeout(Duration::from_millis(750), TcpStream::connect(host_port))
+                .await
+                .map_err(|_| "connect timeout".to_string())?
+                .map_err(|e| e.to_string())?;
+
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut buf = [0u8; 256];
+        let n = tokio::time::timeout(Duration::from_millis(750), stream.read(&mut buf))
+            .await
+            .map_err(|_| "read timeout".to_string())?
+            .map_err(|e| e.to_string())?;
+
+        let response = String::from_utf8_lossy(&buf[..n]);
+        let status = response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        if (200..400).contains(&status) {
+            Ok(())
+        } else if status > 0 {
+            Err(format!("HTTP {status}"))
+        } else {
+            Err("invalid HTTP response".into())
+        }
+    }
+    .await;
+
+    LiveLatencyRow {
+        healthy: result.is_ok(),
+        response_ms: start.elapsed().as_millis() as i64,
+        error: result.err(),
+    }
 }
 
 fn service_state_error(row: &SystemdRow) -> Option<String> {
@@ -788,10 +903,12 @@ mod tests {
             ServiceTarget {
                 service: "core".into(),
                 unit: "genie-core.service".into(),
+                latency_url: Some("http://127.0.0.1:3000/api/health".into()),
             },
             ServiceTarget {
                 service: "api".into(),
                 unit: "genie-api.service".into(),
+                latency_url: Some("http://127.0.0.1:3080/api/status".into()),
             },
         ];
         let health = BTreeMap::from([(
@@ -819,24 +936,64 @@ mod tests {
                 "genie-api.service".into(),
                 SystemdRow {
                     load_state: "loaded".into(),
-                    active_state: "inactive".into(),
-                    sub_state: "dead".into(),
+                    active_state: "active".into(),
+                    sub_state: "running".into(),
                     unit_file_state: "enabled".into(),
                     result: "success".into(),
                     error: None,
                 },
             ),
         ]);
+        let live_latency = BTreeMap::from([(
+            "api".into(),
+            LiveLatencyRow {
+                healthy: false,
+                response_ms: 17,
+                error: Some("HTTP 503".into()),
+            },
+        )]);
 
-        let rows = merge_service_rows(&targets, &health, &systemd);
+        let rows = merge_service_rows(&targets, &health, &live_latency, &systemd);
         let core = rows.iter().find(|row| row.service == "core").unwrap();
         let api = rows.iter().find(|row| row.service == "api").unwrap();
 
         assert!(core.healthy);
         assert_eq!(core.response_ms, Some(42));
+        assert_eq!(core.latency_source, "health");
         assert_eq!(core.source, "health+systemd");
         assert!(!api.healthy);
-        assert_eq!(api.error.as_deref(), Some("dead"));
-        assert_eq!(api.source, "systemd");
+        assert_eq!(api.response_ms, Some(17));
+        assert_eq!(api.latency_source, "live");
+        assert_eq!(api.error.as_deref(), Some("HTTP 503"));
+        assert_eq!(api.source, "live+systemd");
+    }
+
+    #[test]
+    fn systemd_only_service_rows_mark_latency_not_applicable() {
+        let targets = vec![ServiceTarget {
+            service: "wakeword".into(),
+            unit: "genie-wakeword.service".into(),
+            latency_url: None,
+        }];
+        let systemd = BTreeMap::from([(
+            "genie-wakeword.service".into(),
+            SystemdRow {
+                load_state: "loaded".into(),
+                active_state: "failed".into(),
+                sub_state: "failed".into(),
+                unit_file_state: "disabled".into(),
+                result: "exit-code".into(),
+                error: None,
+            },
+        )]);
+
+        let rows = merge_service_rows(&targets, &BTreeMap::new(), &BTreeMap::new(), &systemd);
+        let wakeword = rows.first().unwrap();
+
+        assert!(!wakeword.healthy);
+        assert_eq!(wakeword.response_ms, None);
+        assert_eq!(wakeword.latency_source, "not_applicable");
+        assert_eq!(wakeword.error.as_deref(), Some("failed"));
+        assert_eq!(wakeword.source, "systemd");
     }
 }
