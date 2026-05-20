@@ -18,7 +18,7 @@
 //!   genie-ctl version         Show version info
 
 use anyhow::Result;
-use genie_common::config::Config;
+use genie_common::config::{Config, parse_service_probe_target};
 use genie_core::skills::{
     SkillLoader, SkillManifestAudit, find_manifest_sidecar, manifest_sidecar_candidates,
     skills_dir as runtime_skills_dir,
@@ -36,6 +36,24 @@ const GOVERNOR_SOCK: &str = "/run/geniepod/governor.sock";
 
 fn load_core_addr() -> Result<String> {
     Ok(Config::load()?.core_http_addr())
+}
+
+/// Probe targets for the optional HTTP services that `status`, `diag`, and
+/// the support bundle inspect alongside `genie-core`. Reads `[services.api]`
+/// and `[services.homeassistant]` from `geniepod.toml` so non-default
+/// hosts/ports are honored. Home Assistant is omitted when not configured.
+fn optional_http_probes(config: &Config) -> Vec<(String, String, String)> {
+    let mut probes = Vec::new();
+
+    let (addr, path) = parse_service_probe_target(&config.services.api.url);
+    probes.push(("genie-api".to_string(), addr, path));
+
+    if let Some(ha) = config.homeassistant_service() {
+        let (addr, path) = parse_service_probe_target(&ha.url);
+        probes.push(("Home Assistant".to_string(), addr, path));
+    }
+
+    probes
 }
 const SKILL_RESTART_HINT: &str =
     "Restart genie-core to load skill changes, or wait until the next startup.";
@@ -1034,7 +1052,8 @@ async fn cmd_connectivity() -> Result<()> {
 }
 
 async fn cmd_health() -> Result<()> {
-    let core = load_core_addr()?;
+    let config = Config::load()?;
+    let core = config.core_http_addr();
     let core_health = match http_get(&core, "/api/health").await {
         Ok(body) => {
             println!("  [OK]   genie-core");
@@ -1055,13 +1074,9 @@ async fn cmd_health() -> Result<()> {
         }
     }
 
-    // Check each remaining HTTP service.
-    let services = [
-        ("Home Assistant", "127.0.0.1:8123", "/api/"),
-        ("genie-api", "127.0.0.1:3080", "/api/status"),
-    ];
-    for (name, addr, path) in &services {
-        match http_get(addr, path).await {
+    // Check each remaining HTTP service, honoring [services.*] in geniepod.toml.
+    for (name, addr, path) in optional_http_probes(&config) {
+        match http_get(&addr, &path).await {
             Ok(_) => println!("  [OK]   {}", name),
             Err(_) => println!("  [DOWN] {}", name),
         }
@@ -1169,7 +1184,8 @@ async fn cmd_update_check() -> Result<()> {
 }
 
 async fn cmd_diag() -> Result<()> {
-    let core = load_core_addr()?;
+    let config = Config::load()?;
+    let core = config.core_http_addr();
     println!("=== GeniePod Diagnostics ===\n");
 
     // Version.
@@ -1178,11 +1194,12 @@ async fn cmd_diag() -> Result<()> {
 
     // Core health.
     println!("\n[Services]");
-    let services = [
-        ("genie-core", core.as_str(), "/api/health"),
-        ("genie-api", "127.0.0.1:3080", "/api/status"),
-        ("Home Assistant", "127.0.0.1:8123", "/api/"),
-    ];
+    let mut services: Vec<(String, String, String)> = vec![(
+        "genie-core".to_string(),
+        core.clone(),
+        "/api/health".to_string(),
+    )];
+    services.extend(optional_http_probes(&config));
     for (name, addr, path) in &services {
         let status = match http_get(addr, path).await {
             Ok(_) => "UP",
@@ -1345,12 +1362,15 @@ async fn cmd_diag() -> Result<()> {
 }
 
 async fn cmd_support_bundle(output_path: &Path) -> Result<()> {
-    let core = load_core_addr()?;
-    let services = [
-        ("genie-core", core.as_str(), "/api/health"),
-        ("genie-api", "127.0.0.1:3080", "/api/status"),
-        ("Home Assistant", "127.0.0.1:8123", "/api/"),
-    ];
+    let config = Config::load()?;
+    let core = config.core_http_addr();
+    let (api_addr, _api_path) = parse_service_probe_target(&config.services.api.url);
+    let mut services: Vec<(String, String, String)> = vec![(
+        "genie-core".to_string(),
+        core.clone(),
+        "/api/health".to_string(),
+    )];
+    services.extend(optional_http_probes(&config));
 
     let mut service_status = Vec::new();
     for (name, addr, path) in &services {
@@ -1376,11 +1396,11 @@ async fn cmd_support_bundle(output_path: &Path) -> Result<()> {
             "runtime_contract": http_json_value(&core, "/api/runtime/contract").await,
             "connectivity": http_json_value(&core, "/api/connectivity").await,
         },
-        "security": http_json_value("127.0.0.1:3080", "/api/security").await,
+        "security": http_json_value(&api_addr, "/api/security").await,
         "actuation": {
             "pending": http_json_value(&core, "/api/actuation/pending").await,
             "actions": http_json_value(&core, "/api/actuation/actions").await,
-            "audit": http_json_value("127.0.0.1:3080", "/api/actuation/audit").await,
+            "audit": http_json_value(&api_addr, "/api/actuation/audit").await,
         },
         "system": {
             "meminfo": read_file_lines("/proc/meminfo", 8),
@@ -1684,9 +1704,57 @@ async fn governor_cmd(json: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genie_common::config::ServiceEndpoint;
     use std::process::Command;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn default_test_config() -> Config {
+        toml::from_str("").expect("default config should parse from empty TOML")
+    }
+
+    #[test]
+    fn optional_http_probes_uses_configured_api_url() {
+        let mut config = default_test_config();
+        config.services.api.url = "http://10.0.0.7:4080/api/status".into();
+
+        let probes = optional_http_probes(&config);
+        // Default config has no homeassistant; only the api probe is present.
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].0, "genie-api");
+        assert_eq!(probes[0].1, "10.0.0.7:4080");
+        assert_eq!(probes[0].2, "/api/status");
+    }
+
+    #[test]
+    fn optional_http_probes_skips_homeassistant_when_unconfigured() {
+        let config = default_test_config();
+        assert!(config.homeassistant_service().is_none());
+
+        let probes = optional_http_probes(&config);
+        assert!(
+            !probes.iter().any(|(name, _, _)| name == "Home Assistant"),
+            "HA probe must be omitted when [services.homeassistant] is absent",
+        );
+    }
+
+    #[test]
+    fn optional_http_probes_includes_homeassistant_when_configured() {
+        let mut config = default_test_config();
+        config.services.homeassistant = Some(ServiceEndpoint {
+            url: "http://192.168.1.50:8123/".into(),
+            systemd_unit: "homeassistant.service".into(),
+            backend: Default::default(),
+        });
+
+        let probes = optional_http_probes(&config);
+        let ha = probes
+            .iter()
+            .find(|(name, _, _)| name == "Home Assistant")
+            .expect("HA probe should be present");
+        assert_eq!(ha.1, "192.168.1.50:8123");
+        assert_eq!(ha.2, "/");
+    }
 
     fn workspace_root() -> PathBuf {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
