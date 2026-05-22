@@ -6,8 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a bug. GenieClaw is Jetson-first, so
-        hardware and JetPack context are usually load-bearing.
+        Thanks for taking the time to file a bug. GenieClaw is an edge-first
+        home AI agent with Jetson as the flagship target, so hardware and
+        JetPack context are often load-bearing.
 
         If this is specifically a **voice-pipeline** or **audio-chain** bug,
         please use those dedicated templates instead — their structured fields

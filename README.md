@@ -4,14 +4,14 @@
 [![Jetson cross-compile](https://github.com/GeniePod/genie-claw/actions/workflows/cross.yml/badge.svg)](https://github.com/GeniePod/genie-claw/actions/workflows/cross.yml)
 [![Audit](https://github.com/GeniePod/genie-claw/actions/workflows/audit.yml/badge.svg)](https://github.com/GeniePod/genie-claw/actions/workflows/audit.yml)
 
-**A private, always-on AI for your home. Runs entirely on a Jetson Orin Nano.
-Voice in, voice out, controls Home Assistant, no cloud.**
+**Limited context, powerful AI harness for agentic smart homes. GenieClaw is
+portable across SBCs and native to GeniePod Home.**
 
-- 🎙️ Local voice loop — wake word → STT (Whisper) → LLM → TTS (Piper) → action
-- 🧠 Local memory — conversations and household context kept in SQLite on the device
-- 🏠 Home Assistant control behind a safety gate (rate-limited, confirmed, audited)
-- 🔒 Private by default — no audio, no transcripts, no model traffic leaves the box
-- 🦀 Rust runtime, ~8 GB Jetson Orin Nano target, alpha-grade today
+- Limited context by design — 4096-token Jetson baseline before larger adaptive contexts
+- Strong agent harness — prompt, tool, memory, and home-runtime contracts for constrained models
+- Agentic smart home core — memory, tools, confirmations, audit, and Home Assistant today
+- Portable across SBCs — headless and local-runtime profiles for Jetson, Raspberry Pi, laptops, and Macs
+- Native GeniePod Home path — voice, `genie-ai-runtime`, and private household data on Jetson
 
 ![GenieClaw](doc/assets/genie-claw.png)
 
@@ -26,9 +26,11 @@ Voice in, voice out, controls Home Assistant, no cloud.**
 
 ## How it works
 
-A complete voice cycle never leaves the appliance. Audio is captured on
-the Jetson, routed through five on-device stages, and answered in audio.
-No audio, no transcripts, no model traffic crosses your network boundary.
+The flagship GeniePod Home path keeps the complete voice cycle on the
+appliance. Audio is captured on the Jetson, routed through five on-device
+stages, and answered in audio. Portable and headless profiles use the same
+agent contracts, but can swap runtime/provider boundaries for development and
+CI.
 
 ```
    you speak                      you hear
@@ -77,7 +79,7 @@ spoken-policy filtering, durable promotion under `memory/MEMORY.md`),
 and Home Assistant integration behind a final actuation safety gate
 (rate limit + confirmation + audit).
 
-### What stays local — always
+### What stays local in the flagship path
 
 - **audio capture** — never leaves the device
 - **transcripts** — in-memory only, no disk write
@@ -86,10 +88,14 @@ and Home Assistant integration behind a final actuation safety gate
 - **Home Assistant traffic** — local network only
 - **audit ledger** — append-only, on-device
 
-The only network egress GenieClaw makes by default is the optional
+The only network egress the flagship local path makes by default is the optional
 `web_search` tool, which calls DuckDuckGo Instant Answer (no API key,
 no account, no telemetry). Disable it via `[web_search] enabled = false`
 and the appliance is fully air-gappable.
+
+Optional API-key providers may be added behind explicit features/config, but
+they must still pass the limited-context home-agent contract before they are
+treated as production paths.
 
 GenieClaw owns the **agent layer**: prompts, memory, tool routing, voice
 orchestration, channel adapters. It does **not** own the LLM kernels (see
@@ -156,9 +162,9 @@ M1 closes when, on a clean Jetson Orin Nano Super 8 GB:
 ## Why It Exists
 
 OpenClaw proved that people want AI that feels present, remembers context, and
-fits into everyday life. GenieClaw exists to keep what people wanted and fix the
-problems: tighter architecture, stronger privacy boundaries, better security,
-lower memory footprint, and a more appliance-like deployment model.
+fits into everyday life. GenieClaw exists to turn that into a limited-context
+home agent: smaller prompts, stronger boundaries, repeatable harness tests,
+safer physical actions, and an appliance-like deployment model.
 
 Its direction comes from deep analysis of OpenClaw, ZeroClaw, NanoClaw,
 NemoClaw, and OpenFang. The ambition is simple: build the best Claw in the
@@ -168,19 +174,22 @@ world for the home.
 
 This repo is the Rust agent runtime for a very specific product shape:
 
-- a Jetson-first home AI appliance
+- a limited-context home AI agent, tuned for constrained edge hardware
+- a Jetson-first flagship appliance path for GeniePod Home
 - a full local voice pipeline: wake word, STT, LLM orchestration, tools, and TTS
+- a portable headless path for servers, laptops, Macs, Raspberry Pi, and other SBCs
 - a local household memory system
+- deterministic test harnesses for model/tool/home behavior
 - safe handoff to a home-control runtime
 - transitional Home Assistant support while `genie-home-runtime` is not yet split out
 - pluggable local LLM backend (`genie-ai-runtime` default on Jetson; `llama.cpp` remains selectable via `[services.llm].backend = "llama_cpp"`)
+- optional API-provider direction only when small-context behavior remains correct
 - a privacy-first and security-first system
-- a memory-footprint-conscious runtime built for constrained edge hardware
 - a household trust model that exposes redacted posture, not raw config files
 
 If you want a short definition:
 
-> GenieClaw is the local agent layer for private physical AI at home.
+> GenieClaw is the limited-context local agent layer for private physical AI at home.
 
 ## Ecosystem Position
 
@@ -306,13 +315,15 @@ assistant that still feels fast and reliable on 8 GB unified memory.
 
 ## Product Direction
 
-The current product target is **GeniePod Home**:
+The current product target is **GeniePod Home**, with a portable smart-home
+agent runtime that can run beyond the flagship device:
 
 - a shared-space AI appliance for the living room or kitchen
-- Jetson-first rather than everywhere-first
+- limited-context first rather than large-context by default
+- Jetson as the flagship target, not the only meaningful development target
 - useful before smart-home integration
-- stronger when connected to Home Assistant
-- built around privacy, security, and bounded extensions
+- stronger when connected to Home Assistant and later `genie-home-runtime`
+- built around privacy, security, bounded extensions, and testable behavior
 - designed to feel stable, understandable, and privacy-respecting
 
 ## Quick Start

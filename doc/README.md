@@ -25,7 +25,7 @@ Where current code is transitional, the docs call that out explicitly.
 - [household-security.md](household-security.md): family/shared-memory trust model and redacted config policy
 - [core-subsystems.md](core-subsystems.md): LLM, prompt, tools, memory, voice, Telegram, security, and skills
 - [deployment-and-ops.md](deployment-and-ops.md): local dev, Docker, Jetson deploy, systemd, and operations
-- [milestone-1-portable-home-agent.md](milestone-1-portable-home-agent.md): M1 architecture movement for portable contribution without weakening the Jetson-first home-agent goal
+- [milestone-1-portable-home-agent.md](milestone-1-portable-home-agent.md): M1 architecture movement for portable validation without weakening the limited-context home-agent goal
 - [repo-map.md](repo-map.md): top-level files, directories, and module map
 - [research-agentic-ai.md](research-agentic-ai.md): research notes from current agentic AI application patterns and what GenieClaw adopts
 - [alpha5-reflection.md](alpha5-reflection.md): critique-first next-alpha preparation notes

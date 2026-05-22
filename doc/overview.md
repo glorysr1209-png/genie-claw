@@ -2,17 +2,21 @@
 
 ## Purpose
 
-GenieClaw is the local agent layer for GeniePod Home and the broader Genie
-ecosystem.
+GenieClaw is the limited-context local agent layer for GeniePod Home and the
+broader Genie ecosystem.
 
 The repo is optimized around a narrow goal:
 
-- run locally on Jetson-class hardware
+- run locally on Jetson-class hardware as the flagship target
+- preserve a 4096-token small-context baseline before larger adaptive contexts
 - keep the system understandable and debuggable
+- keep agent/provider/home behavior testable through deterministic harnesses
 - provide everyday household usefulness before broad platform ambition
 - preserve privacy, bounded behavior, and graceful degradation
 
-This is not a cloud orchestration shell and not a generic agent runtime.
+This is not a cloud orchestration shell and not a generic agent runtime. Remote
+or API-key providers can be useful optional adapters, but they must fit the
+limited-context home-agent contract rather than redefine the product.
 
 ## Ecosystem Role
 
