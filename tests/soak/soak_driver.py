@@ -46,6 +46,8 @@ Telemetry record schema (one JSON object per line):
     }
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

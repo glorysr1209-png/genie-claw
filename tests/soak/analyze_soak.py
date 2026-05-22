@@ -12,6 +12,8 @@ Stdlib only. Run `--self-check` to score the committed example fixture and
 assert the expected verdicts — that exercises every code path without a Jetson.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

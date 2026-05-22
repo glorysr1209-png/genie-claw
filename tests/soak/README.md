@@ -96,3 +96,8 @@ python3 tests/soak/analyze_soak.py --self-check   # scores example/, asserts ver
 python3 tests/soak/example/make_fixture.py        # regenerate the synthetic fixture
 make soak-selfcheck                               # same self-check via make
 ```
+
+The Python tools are stdlib-only and run on **Python 3.9+** (annotations are
+deferred via `from __future__ import annotations`, so the hardware-free
+self-check works on the older interpreters some CI images still ship). A real
+soak runs against the Jetson Ubuntu 22.04 image's Python 3.10.
