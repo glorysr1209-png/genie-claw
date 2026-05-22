@@ -329,8 +329,8 @@ impl Memory {
         let raw_entries: Vec<(MemoryEntry, f64, bool)> = stmt
             .query_map(rusqlite::params![fts_query, limit * 3], |row| {
                 let entry = read_entry(row)?;
-                let bm25_rank: f64 = row.get::<_, f64>(11).unwrap_or(0.0);
-                let evergreen: bool = row.get::<_, i64>(10).unwrap_or(0) != 0;
+                let bm25_rank: f64 = row.get::<_, f64>(12).unwrap_or(0.0);
+                let evergreen: bool = row.get::<_, i64>(11).unwrap_or(0) != 0;
                 Ok((entry, bm25_rank, evergreen))
             })?
             .filter_map(|r| r.ok())
