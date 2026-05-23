@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use genie_common::config::{Config, ServiceEndpoint};
+use genie_common::config::Config;
 use rusqlite::Connection;
 use tokio::net::TcpStream;
 use tokio::signal::unix::{SignalKind, signal};
@@ -22,6 +22,29 @@ pub struct HealthMonitor {
     db: Connection,
     /// Track consecutive failures per service for alert dedup.
     failure_counts: std::collections::HashMap<String, u32>,
+}
+
+/// Materialize `(name, probe_url)` pairs for every service the health monitor
+/// owns. Core's probe is derived from `[core].bind_host` and `[core].port` so it
+/// tracks where core actually listens even if `[services.core].url` is stale.
+fn collect_endpoints(config: &Config) -> Vec<(String, String)> {
+    let mut endpoints = vec![
+        ("core".into(), config.core_health_url()),
+        ("llm".into(), config.services.llm.url.clone()),
+    ];
+
+    if let Some(ref ha) = config.services.homeassistant {
+        endpoints.push(("homeassistant".into(), ha.url.clone()));
+    }
+
+    if let Some(ref nc) = config.services.nextcloud {
+        endpoints.push(("nextcloud".into(), nc.url.clone()));
+    }
+    if let Some(ref jf) = config.services.jellyfin {
+        endpoints.push(("jellyfin".into(), jf.url.clone()));
+    }
+
+    endpoints
 }
 
 impl HealthMonitor {
@@ -83,11 +106,7 @@ impl HealthMonitor {
         let ts_ms = now_ms();
 
         // Collect endpoints as owned data to avoid borrowing self in the loop.
-        let services: Vec<(String, String)> = self
-            .collect_endpoints()
-            .into_iter()
-            .map(|(name, ep)| (name, ep.url.clone()))
-            .collect();
+        let services = collect_endpoints(&self.config);
 
         for (name, url) in &services {
             let status = check_http(name, url).await;
@@ -131,26 +150,6 @@ impl HealthMonitor {
         let _ = self
             .db
             .execute("DELETE FROM health_log WHERE ts_ms < ?1", [cutoff]);
-    }
-
-    fn collect_endpoints(&self) -> Vec<(String, &ServiceEndpoint)> {
-        let mut endpoints = vec![
-            ("core".into(), &self.config.services.core),
-            ("llm".into(), &self.config.services.llm),
-        ];
-
-        if let Some(ref ha) = self.config.services.homeassistant {
-            endpoints.push(("homeassistant".into(), ha));
-        }
-
-        if let Some(ref nc) = self.config.services.nextcloud {
-            endpoints.push(("nextcloud".into(), nc));
-        }
-        if let Some(ref jf) = self.config.services.jellyfin {
-            endpoints.push(("jellyfin".into(), jf));
-        }
-
-        endpoints
     }
 
     async fn send_alert(&self, status: &ServiceStatus) {
@@ -330,12 +329,42 @@ mod tests {
 
     #[test]
     fn collect_endpoints_skips_unconfigured_homeassistant() {
-        let monitor = HealthMonitor::new(test_config()).unwrap();
-        let endpoints = monitor.collect_endpoints();
+        let endpoints = collect_endpoints(&test_config());
         let names: Vec<&str> = endpoints.iter().map(|(name, _)| name.as_str()).collect();
 
         assert!(names.contains(&"core"));
         assert!(names.contains(&"llm"));
         assert!(!names.contains(&"homeassistant"));
+    }
+
+    #[test]
+    fn core_endpoint_url_tracks_configured_core_port() {
+        let mut config = test_config();
+        config.core.port = 3001;
+        config.services.core.url = "http://127.0.0.1:3000/api/health".into();
+
+        let endpoints = collect_endpoints(&config);
+        let core_url = endpoints
+            .iter()
+            .find(|(name, _)| name == "core")
+            .map(|(_, url)| url.as_str())
+            .expect("core endpoint should always be present");
+
+        assert_eq!(core_url, "http://127.0.0.1:3001/api/health");
+    }
+
+    #[test]
+    fn llm_endpoint_url_still_sources_from_services_config() {
+        let mut config = test_config();
+        config.services.llm.url = "http://127.0.0.1:9999/v1/health".into();
+
+        let endpoints = collect_endpoints(&config);
+        let llm_url = endpoints
+            .iter()
+            .find(|(name, _)| name == "llm")
+            .map(|(_, url)| url.as_str())
+            .expect("llm endpoint should always be present");
+
+        assert_eq!(llm_url, "http://127.0.0.1:9999/v1/health");
     }
 }

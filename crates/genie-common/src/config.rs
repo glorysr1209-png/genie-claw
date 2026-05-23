@@ -960,6 +960,16 @@ impl Config {
         format!("{host}:{}", self.core.port)
     }
 
+    /// Health-probe URL for genie-core, derived from `[core].bind_host` and
+    /// `[core].port` instead of `[services.core].url`.
+    ///
+    /// Local probes should follow where core actually listens. Reading
+    /// `[services.core].url` can drift when an operator changes `[core].port`
+    /// but leaves the service URL at its default, producing false DOWN signals.
+    pub fn core_health_url(&self) -> String {
+        format!("http://{}/api/health", self.core_http_addr())
+    }
+
     /// TCP `host:port` for `genie-api` to bind, derived from `[services.api].url`.
     ///
     /// Keeps the listen socket aligned with health probes and `genie-ctl` that
@@ -1556,6 +1566,42 @@ systemd_unit = "genie-ai-runtime.service"
         config.core.port = 3000;
         config.core.bind_host = "0.0.0.0".into();
         assert_eq!(config.core_http_addr(), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn core_health_url_uses_default_port() {
+        let config = test_config();
+        assert_eq!(config.core_health_url(), "http://127.0.0.1:3000/api/health");
+    }
+
+    #[test]
+    fn core_health_url_tracks_custom_core_port() {
+        let mut config = test_config();
+        config.core.port = 3001;
+        assert_eq!(config.core_health_url(), "http://127.0.0.1:3001/api/health");
+    }
+
+    #[test]
+    fn core_health_url_maps_listen_all_to_loopback() {
+        let mut config = test_config();
+        config.core.bind_host = "0.0.0.0".into();
+        assert_eq!(config.core_health_url(), "http://127.0.0.1:3000/api/health");
+    }
+
+    #[test]
+    fn core_health_url_honors_custom_bind_host() {
+        let mut config = test_config();
+        config.core.bind_host = "10.0.0.5".into();
+        config.core.port = 4000;
+        assert_eq!(config.core_health_url(), "http://10.0.0.5:4000/api/health");
+    }
+
+    #[test]
+    fn core_health_url_ignores_stale_services_core_url() {
+        let mut config = test_config();
+        config.core.port = 3001;
+        config.services.core.url = "http://127.0.0.1:3000/api/health".into();
+        assert_eq!(config.core_health_url(), "http://127.0.0.1:3001/api/health");
     }
 
     #[test]
