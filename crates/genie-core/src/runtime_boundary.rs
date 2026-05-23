@@ -42,7 +42,7 @@ pub fn runtime_boundaries(agent: &AgentConfig) -> Vec<RuntimeBoundaryContract> {
             layer: "ai_runtime",
             owner: "genie-ai-runtime",
             mode: format!("{:?}", agent.ai_runtime_boundary),
-            contract: "OpenAI-compatible chat plus limited-context request compaction",
+            contract: "OpenAI-compatible chat plus limited-context compaction, conversation_id, and nvext.agent_hints",
             local_default: true,
         },
         RuntimeBoundaryContract {

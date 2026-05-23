@@ -95,7 +95,38 @@ Next work:
 
 - integrate contract drift with OTA/update windows and alert forwarding
 
-### 4. Security And Permission Boundaries Are Core Features
+### 4. Agentic Inference Is KV-Cache Infrastructure
+
+NVIDIA Dynamo frames coding-agent inference as a harness/orchestrator/runtime
+coordination problem: repeated turns reuse a large prefix, tool pauses can evict
+valuable KV, and bursty agent calls need priority and output-length hints.
+
+GenieClaw relevance:
+
+- session identity should cross the LLM API boundary
+- harness-known output length, priority, and cache TTL should be explicit
+- prompt compaction and history behavior can dominate latency more than model
+  quality
+- runtime metrics must distinguish total prompt tokens from newly-prefilled
+  tokens
+
+Current implementation:
+
+- `LlmRequestHints` carries session id, priority, expected output length, and
+  ephemeral cache TTL
+- `genie-ai-runtime` requests include `conversation_id` plus `nvext.agent_hints`
+  and `nvext.cache_control`
+- web chat, REPL, voice, and compatible `/v1/chat/completions` callers can keep
+  runtime KV keyed to the conversation/session
+
+Next work:
+
+- dashboard-visible KV reuse and prefill-token counters
+- pressure-aware cache TTLs from the governor
+- explicit compaction events that tell the runtime old session KV can be
+  reclaimed
+
+### 5. Security And Permission Boundaries Are Core Features
 
 Agentic systems fail dangerously when tools, memory, and external input share
 one unbounded trust zone.
@@ -123,7 +154,7 @@ Next work:
 - stronger native skill sandboxing
 - RAG/document-ingest prompt-injection screening before vector memory rollout
 
-### 5. Multi-Agent Patterns Are Useful Only Behind Strong Isolation
+### 6. Multi-Agent Patterns Are Useful Only Behind Strong Isolation
 
 Multi-agent systems are useful for coding and research workflows, but a home
 physical agent should not spawn unconstrained workers for actuation.
@@ -144,7 +175,7 @@ Next work:
 - isolated workspaces for future developer/operator tasks
 - explicit routing rules before any multi-agent feature reaches production
 
-### 6. RAG And Vector Search Belong In Memory, But Must Be Treated As Untrusted
+### 7. RAG And Vector Search Belong In Memory, But Must Be Treated As Untrusted
 
 RAG increases usefulness, but retrieved chunks can carry indirect prompt
 injection. Vector search also creates real edge-inference and GPU acceleration
