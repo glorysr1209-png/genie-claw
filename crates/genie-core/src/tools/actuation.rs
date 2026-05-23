@@ -327,14 +327,27 @@ impl AuditLogger {
         let Some(path) = &self.path else {
             return Vec::new();
         };
-        let Ok(file) = File::open(path) else {
-            return Vec::new();
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "audit read failed; returning no recent executed actions"
+                );
+                return Vec::new();
+            }
         };
         let mut actions = BufReader::new(file)
             .lines()
             .map_while(Result::ok)
-            .filter_map(|line| serde_json::from_str::<AuditEvent>(&line).ok())
-            .filter_map(audit_event_to_recorded_action)
+            .filter_map(|line| match serde_json::from_str::<AuditEvent>(&line) {
+                Ok(event) => audit_event_to_recorded_action(event),
+                Err(e) => {
+                    tracing::debug!(path = %path.display(), error = %e, "audit line parse failed");
+                    None
+                }
+            })
             .collect::<Vec<_>>();
         if actions.len() > limit {
             actions.drain(0..actions.len() - limit);
@@ -553,6 +566,31 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].entity, "kitchen light");
         assert_eq!(actions[0].inverse_action.as_deref(), Some("turn_off"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_logger_read_returns_empty_when_file_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "geniepod-actuation-audit-unreadable-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"{}\n").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let logger = AuditLogger::new(&path);
+        let actions = logger.read_recent_executed_actions(10);
+        assert!(actions.is_empty());
+
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        let _ = std::fs::set_permissions(&path, perms);
         let _ = std::fs::remove_file(&path);
     }
 }
