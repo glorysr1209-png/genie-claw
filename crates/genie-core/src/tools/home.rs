@@ -35,12 +35,20 @@ pub async fn control(
     let policy = assess_home_action(&action);
     if !policy.allowed {
         if policy.requires_confirmation {
-            return Ok(ControlOutcome::ConfirmationRequired {
-                reason: policy.reason,
-                target_display: action.target.display_name,
-            });
+            // A confirmable policy is satisfied once the caller has supplied a
+            // confirmation. Without `confirmed` we would re-issue a fresh
+            // confirmation request on every retry, never executing the action.
+            if !confirmed {
+                return Ok(ControlOutcome::ConfirmationRequired {
+                    reason: policy.reason,
+                    target_display: action.target.display_name,
+                });
+            }
+            // confirmed → fall through to the runtime safety gate
+        } else {
+            // hard deny — not a confirmable action
+            anyhow::bail!("Home action blocked by local policy: {}", policy.reason);
         }
-        anyhow::bail!("Home action blocked by local policy: {}", policy.reason);
     }
 
     if !confirmed
@@ -282,6 +290,35 @@ mod tests {
                 );
             }
             ControlOutcome::Executed(_, _) => panic!("expected confirmation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn control_executes_sensitive_action_once_confirmed() {
+        // Regression for #138: a satisfied confirmation must let a sensitive
+        // action proceed instead of looping back into ConfirmationRequired.
+        let home = StubHome {
+            domain: "lock",
+            voice_safe: false,
+        };
+
+        let result = control(
+            &home,
+            "Front door",
+            "unlock",
+            None,
+            &ActuationSafetyConfig::default(),
+            RequestOrigin::Telegram,
+            true,
+        )
+        .await
+        .unwrap();
+
+        match result {
+            ControlOutcome::Executed(output, _) => assert!(output.contains("Unlock")),
+            ControlOutcome::ConfirmationRequired { .. } => {
+                panic!("confirmed sensitive action should execute, not re-prompt")
+            }
         }
     }
 
