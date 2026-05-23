@@ -111,17 +111,7 @@ impl HealthMonitor {
         for (name, url) in &services {
             let status = check_http(name, url).await;
 
-            // Log to SQLite.
-            let _ = self.db.execute(
-                "INSERT INTO health_log (ts_ms, service, healthy, response_ms, error) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    ts_ms,
-                    status.name,
-                    status.healthy as i32,
-                    status.response_ms,
-                    status.error,
-                ],
-            );
+            insert_health_log(&self.db, ts_ms, &status);
 
             if status.healthy {
                 if self.failure_counts.remove(name).is_some() {
@@ -147,9 +137,7 @@ impl HealthMonitor {
 
         // Prune logs older than 24h every ~120 checks (~1 hour at 30s interval).
         let cutoff = ts_ms.saturating_sub(24 * 3600 * 1000);
-        let _ = self
-            .db
-            .execute("DELETE FROM health_log WHERE ts_ms < ?1", [cutoff]);
+        prune_health_log(&self.db, cutoff);
     }
 
     async fn send_alert(&self, status: &ServiceStatus) {
@@ -178,6 +166,38 @@ impl HealthMonitor {
         if let Err(e) = send_http_post(&url, &payload.to_string()).await {
             tracing::warn!(error = %e, "failed to send alert to local webhook");
         }
+    }
+}
+
+fn insert_health_log(db: &Connection, ts_ms: u64, status: &ServiceStatus) {
+    if let Err(e) = db.execute(
+        "INSERT INTO health_log (ts_ms, service, healthy, response_ms, error) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            ts_ms,
+            status.name,
+            status.healthy as i32,
+            status.response_ms,
+            status.error,
+        ],
+    ) {
+        tracing::error!(
+            service = %status.name,
+            error = %e,
+            "failed to insert health_log row"
+        );
+    }
+}
+
+fn prune_health_log(db: &Connection, cutoff_ts_ms: u64) {
+    if let Err(e) = db.execute(
+        "DELETE FROM health_log WHERE ts_ms < ?1",
+        [cutoff_ts_ms],
+    ) {
+        tracing::error!(
+            cutoff_ts_ms,
+            error = %e,
+            "failed to prune health_log rows"
+        );
     }
 }
 
@@ -366,5 +386,100 @@ mod tests {
             .expect("llm endpoint should always be present");
 
         assert_eq!(llm_url, "http://127.0.0.1:9999/v1/health");
+    }
+
+    fn open_test_db(dir: &std::path::Path) -> Connection {
+        let db_path = dir.join("health.db");
+        let db = Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS health_log (
+                ts_ms       INTEGER NOT NULL,
+                service     TEXT NOT NULL,
+                healthy     INTEGER NOT NULL,
+                response_ms INTEGER NOT NULL,
+                error       TEXT
+            );
+            ",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn health_log_insert_and_prune_on_writable_db() {
+        let dir = std::env::temp_dir().join(format!(
+            "genie-health-writable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let db = open_test_db(&dir);
+        let status = ServiceStatus {
+            name: "core".into(),
+            url: "http://127.0.0.1:3000/api/health".into(),
+            healthy: true,
+            response_ms: 12,
+            error: None,
+        };
+
+        insert_health_log(&db, 1_000, &status);
+        insert_health_log(&db, 2_000, &status);
+
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM health_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        prune_health_log(&db, 1_500);
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM health_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn health_log_write_errors_do_not_panic_on_readonly_db() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("genie-health-readonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let db_path = dir.join("health.db");
+        {
+            let db = open_test_db(&dir);
+            drop(db);
+        }
+
+        let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+
+        let db = Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+
+        let status = ServiceStatus {
+            name: "core".into(),
+            url: "http://127.0.0.1:3000/api/health".into(),
+            healthy: false,
+            response_ms: 0,
+            error: Some("timeout".into()),
+        };
+
+        insert_health_log(&db, 9_000, &status);
+        prune_health_log(&db, 0);
+
+        let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
