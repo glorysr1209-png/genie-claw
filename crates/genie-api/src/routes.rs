@@ -237,7 +237,7 @@ fn dashboard_service_targets(config: &Config) -> Vec<ServiceTarget> {
         ServiceTarget {
             service: "api".into(),
             unit: config.services.api.systemd_unit.clone(),
-            latency_url: Some(config.services.api.url.clone()),
+            latency_url: config.api_status_url().ok(),
             disabled_reason: None,
         },
         ServiceTarget {
@@ -942,6 +942,23 @@ mod tests {
         assert_eq!(
             core_target.latency_url.as_deref(),
             Some("http://127.0.0.1:3001/api/health"),
+        );
+    }
+
+    #[test]
+    fn dashboard_api_target_uses_derived_status_url() {
+        let mut config = test_config();
+        config.services.api.url = "127.0.0.1:4080/api/status".into();
+
+        let targets = dashboard_service_targets(&config);
+        let api_target = targets
+            .iter()
+            .find(|target| target.service == "api")
+            .expect("api target should always be present");
+
+        assert_eq!(
+            api_target.latency_url.as_deref(),
+            Some("http://127.0.0.1:4080/api/status"),
         );
     }
 

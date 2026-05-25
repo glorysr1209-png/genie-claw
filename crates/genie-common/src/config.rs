@@ -984,6 +984,14 @@ impl Config {
         }
     }
 
+    /// Status-probe URL for genie-api, derived from `[services.api].url` host:port.
+    ///
+    /// Normalizes bare authorities (e.g. `127.0.0.1:4080/api/status`) to a full
+    /// `http://…/api/status` URL for dashboard latency probes.
+    pub fn api_status_url(&self) -> anyhow::Result<String> {
+        Ok(format!("http://{}/api/status", self.api_http_addr()?))
+    }
+
     /// Resolve the configured Home Assistant endpoint, if this deployment uses one.
     pub fn homeassistant_service(&self) -> Option<&ServiceEndpoint> {
         self.services.homeassistant.as_ref()
@@ -1625,6 +1633,25 @@ systemd_unit = "genie-ai-runtime.service"
         assert!(
             err.to_string().contains("unsupported scheme"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn api_status_url_defaults_to_documented_endpoint() {
+        let config = test_config();
+        assert_eq!(
+            config.api_status_url().unwrap(),
+            "http://127.0.0.1:3080/api/status"
+        );
+    }
+
+    #[test]
+    fn api_status_url_normalizes_bare_authority() {
+        let mut config = test_config();
+        config.services.api.url = "127.0.0.1:4080/api/status".into();
+        assert_eq!(
+            config.api_status_url().unwrap(),
+            "http://127.0.0.1:4080/api/status"
         );
     }
 
