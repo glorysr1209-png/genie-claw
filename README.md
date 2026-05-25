@@ -126,9 +126,10 @@ For Jetson setup, deployment, and Home Assistant wiring, use
 ## Contributing
 
 Every PR needs a **Real Behavior Proof** section: what you ran, where you ran it,
-and what happened. CI/local proof is enough for docs, harness, provider, and
-non-hardware work. Hardware-facing changes should include Jetson/device proof or
-state the validation gap clearly.
+which profile or hardware it represents (`jetson`, `raspberry_pi`,
+`portable_sbc`, `laptop`, or `mac`), and what happened. CI/local proof is
+enough for docs, harness, provider, and non-hardware work. Hardware-facing
+changes should include Jetson/device proof or state the validation gap clearly.
 
 ## License
 
