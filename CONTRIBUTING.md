@@ -19,6 +19,8 @@ What we are slower to land:
 - New runtime dependencies (especially anything that needs CUDA, ALSA, or root). Discuss in an issue first.
 - Cosmetic-only changes to working code (style sweeps, mass renames). These churn `git blame` and slow review for everyone else.
 
+All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Required: Real Behavior Proof
 
 Every PR body must include a **"Real Behavior Proof"** section that demonstrates you have actually run the code you are changing. This is **enforced by CI** — a PR with no proof section will fail the `Contribution checklist` job and cannot be merged.
