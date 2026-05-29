@@ -294,8 +294,7 @@ enum RequestRoute<'a> {
 
 impl RequestRoute<'_> {
     /// True for state-changing / actuating endpoints, which require the shared
-    /// local API token when one is configured (issue #228). Read-only routes
-    /// are guarded by the Origin/Host gate alone.
+    /// local API token when one is configured (issue #228).
     fn is_mutating(&self) -> bool {
         matches!(
             self,
@@ -309,6 +308,30 @@ impl RequestRoute<'_> {
                 | RequestRoute::MemoriesReorder
                 | RequestRoute::OpenAiChat
         )
+    }
+
+    /// Household data / actuation state readable over HTTP (issue #303).
+    fn is_sensitive_read(&self) -> bool {
+        matches!(
+            self,
+            RequestRoute::History
+                | RequestRoute::Conversations
+                | RequestRoute::Export(_)
+                | RequestRoute::MemoriesList
+                | RequestRoute::ActuationPending
+                | RequestRoute::ActuationActions
+        )
+    }
+
+    /// Require a configured local API token when the peer is not loopback.
+    fn requires_local_auth(&self, peer: Option<std::net::IpAddr>) -> bool {
+        if self.is_mutating() {
+            return true;
+        }
+        if self.is_sensitive_read() {
+            return !peer.is_some_and(|p| p.is_loopback());
+        }
+        false
     }
 }
 
@@ -599,7 +622,7 @@ async fn handle_request(
     // disallowed Host/Origin is rejected; an allowlisted Origin is reflected in
     // the response (no more wildcard). Mutating/actuating routes additionally
     // require the shared local token when one is configured.
-    let echo_origin = match guard.check_request(&request) {
+    let echo_origin = match guard.check_request(&request, peer_ip) {
         OriginDecision::Allow(origin) => origin,
         OriginDecision::Reject(rejection) => {
             tracing::debug!(reason = rejection.reason(), "request gated out");
@@ -608,8 +631,10 @@ async fn handle_request(
         }
     };
     let route = classify_route(&request.method, &request.path);
-    if route.is_mutating() && !guard.token_ok(&request) {
-        tracing::debug!("mutating request without a valid local API token");
+    if route.requires_local_auth(peer_ip)
+        && (!guard.enforces_token() || !guard.token_ok(&request))
+    {
+        tracing::debug!("request without a valid local API token");
         let _ = write_guard_rejection(
             &mut writer,
             GuardRejection::MissingToken,

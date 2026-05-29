@@ -107,6 +107,7 @@ async fn handle_connection(
     limits: &HttpLimits,
     guard: &RequestGuard,
 ) -> Result<()> {
+    let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
 
@@ -125,7 +126,7 @@ async fn handle_connection(
     };
 
     // Cross-origin / DNS-rebinding gate ahead of routing (issue #228).
-    let echo_origin = match guard.check_request(&request) {
+    let echo_origin = match guard.check_request(&request, peer_ip) {
         OriginDecision::Allow(origin) => origin,
         OriginDecision::Reject(rejection) => {
             tracing::debug!(reason = rejection.reason(), "request gated out");
@@ -137,9 +138,10 @@ async fn handle_connection(
     let method = request.method.as_str();
     let path = request.path.as_str();
 
-    // Mutating/actuating endpoints additionally require the shared local token.
-    if is_mutating(method, path) && !guard.token_ok(&request) {
-        tracing::debug!("mutating request without a valid local API token");
+    if requires_local_auth(method, path, peer_ip)
+        && (!guard.enforces_token() || !guard.token_ok(&request))
+    {
+        tracing::debug!("request without a valid local API token");
         let response = guard_rejection(GuardRejection::MissingToken);
         return write_response(&mut writer, &response, echo_origin.as_deref()).await;
     }
@@ -179,8 +181,6 @@ async fn handle_connection(
     write_response(&mut writer, &response, echo_origin.as_deref()).await
 }
 
-/// State-changing / actuating routes that require the shared local API token
-/// when one is configured (issue #228).
 fn is_mutating(method: &str, path: &str) -> bool {
     method == "POST"
         && matches!(
@@ -191,6 +191,27 @@ fn is_mutating(method: &str, path: &str) -> bool {
                 | "/api/memories/reorder"
                 | "/api/mode"
         )
+}
+
+fn is_sensitive_read(method: &str, path: &str) -> bool {
+    method == "GET"
+        && matches!(
+            path,
+            "/api/memories"
+                | "/api/actuation/pending"
+                | "/api/actuation/actions"
+                | "/api/actuation/audit"
+        )
+}
+
+fn requires_local_auth(method: &str, path: &str, peer: Option<std::net::IpAddr>) -> bool {
+    if is_mutating(method, path) {
+        return true;
+    }
+    if is_sensitive_read(method, path) {
+        return !peer.is_some_and(|p| p.is_loopback());
+    }
+    false
 }
 
 /// `403` response for a gated-out request, reusing the shared rejection reason.

@@ -425,21 +425,33 @@ impl RequestGuard {
     /// Validate `Host` and `Origin` ahead of routing.
     ///
     /// A missing `Host` (non-browser client) is allowed; a present-but-unlisted
-    /// `Host` is rejected. A missing `Origin` (same-origin navigation / non-
-    /// browser) is allowed with nothing reflected; a present `Origin` is
-    /// reflected verbatim when allowlisted, else rejected.
-    pub fn check_request(&self, request: &HttpRequest) -> OriginDecision {
+    /// `Host` is rejected. Loopback-looking `Host` / `Origin` values are only
+    /// accepted when `peer` is a loopback address (issue #303).
+    pub fn check_request(
+        &self,
+        request: &HttpRequest,
+        peer: Option<std::net::IpAddr>,
+    ) -> OriginDecision {
         if let Some(host) = request.header("host") {
             let host = host.trim().to_ascii_lowercase();
-            if !host.is_empty() && !self.allowed_hosts.iter().any(|h| h == &host) {
-                return OriginDecision::Reject(GuardRejection::DisallowedHost);
+            if !host.is_empty() {
+                if !self.allowed_hosts.iter().any(|h| h == &host) {
+                    return OriginDecision::Reject(GuardRejection::DisallowedHost);
+                }
+                if host_looks_loopback(&host) && !peer_is_loopback(peer) {
+                    return OriginDecision::Reject(GuardRejection::DisallowedHost);
+                }
             }
         }
 
         match request.header("origin") {
             None => OriginDecision::Allow(None),
             Some(origin) => {
-                if self.allowed_origins.contains(&normalize_origin(origin)) {
+                let normalized = normalize_origin(origin);
+                if self.allowed_origins.contains(&normalized) {
+                    if origin_looks_loopback(&normalized) && !peer_is_loopback(peer) {
+                        return OriginDecision::Reject(GuardRejection::DisallowedOrigin);
+                    }
                     OriginDecision::Allow(Some(origin.trim().to_string()))
                 } else {
                     OriginDecision::Reject(GuardRejection::DisallowedOrigin)
@@ -522,6 +534,32 @@ fn derive_hosts_and_origins(listen_host: &str, listen_port: u16) -> (Vec<String>
 /// config might).
 fn normalize_origin(origin: &str) -> String {
     origin.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// True when the Host header names a loopback-only target (not LAN extras).
+fn host_looks_loopback(host: &str) -> bool {
+    let host_only = if let Some(rest) = host.strip_prefix('[') {
+        rest.find(']')
+            .map(|idx| &host[..=idx + 1])
+            .unwrap_or(host)
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    matches!(host_only, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+        || host_only.starts_with("127.")
+}
+
+fn origin_looks_loopback(origin: &str) -> bool {
+    origin.starts_with("http://127.")
+        || origin.starts_with("http://localhost")
+        || origin.starts_with("http://[::1]")
+        || origin.starts_with("https://127.")
+        || origin.starts_with("https://localhost")
+        || origin.starts_with("https://[::1]")
+}
+
+fn peer_is_loopback(peer: Option<std::net::IpAddr>) -> bool {
+    peer.is_some_and(|p| p.is_loopback())
 }
 
 /// Extract the token from an `Authorization: Bearer <token>` header value,
@@ -724,6 +762,13 @@ mod tests {
         RequestGuard::new("127.0.0.1", 3000, &[], &[], "")
     }
 
+    const LOOPBACK_PEER: Option<std::net::IpAddr> = Some(std::net::IpAddr::V4(
+        std::net::Ipv4Addr::LOCALHOST,
+    ));
+    const LAN_PEER: Option<std::net::IpAddr> = Some(std::net::IpAddr::V4(
+        std::net::Ipv4Addr::new(192, 168, 1, 50),
+    ));
+
     #[test]
     fn loopback_host_and_origin_for_bound_port_are_allowed() {
         let g = guard();
@@ -734,24 +779,43 @@ mod tests {
             "localhost",
         ] {
             assert_eq!(
-                g.check_request(&req(&[("Host", host)])),
+                g.check_request(&req(&[("Host", host)]), LOOPBACK_PEER),
                 OriginDecision::Allow(None),
                 "host {host} should be allowed"
             );
         }
         assert_eq!(
-            g.check_request(&req(&[
-                ("Host", "localhost:3000"),
-                ("Origin", "http://localhost:3000"),
-            ])),
+            g.check_request(
+                &req(&[
+                    ("Host", "localhost:3000"),
+                    ("Origin", "http://localhost:3000"),
+                ]),
+                LOOPBACK_PEER,
+            ),
             OriginDecision::Allow(Some("http://localhost:3000".into())),
+        );
+    }
+
+    #[test]
+    fn loopback_host_from_lan_peer_is_rejected() {
+        let g = guard();
+        assert_eq!(
+            g.check_request(&req(&[("Host", "localhost:3000")]), LAN_PEER),
+            OriginDecision::Reject(GuardRejection::DisallowedHost),
+        );
+        assert_eq!(
+            g.check_request(
+                &req(&[("Origin", "http://localhost:3000")]),
+                LAN_PEER,
+            ),
+            OriginDecision::Reject(GuardRejection::DisallowedOrigin),
         );
     }
 
     #[test]
     fn missing_host_and_origin_are_allowed_for_non_browser_clients() {
         assert_eq!(
-            guard().check_request(&req(&[])),
+            guard().check_request(&req(&[]), LOOPBACK_PEER),
             OriginDecision::Allow(None)
         );
     }
@@ -760,21 +824,22 @@ mod tests {
     fn cross_site_origin_is_rejected_not_reflected() {
         let g = guard();
         assert_eq!(
-            g.check_request(&req(&[
-                ("Host", "localhost:3000"),
-                ("Origin", "http://evil.example"),
-            ])),
+            g.check_request(
+                &req(&[
+                    ("Host", "localhost:3000"),
+                    ("Origin", "http://evil.example"),
+                ]),
+                LOOPBACK_PEER,
+            ),
             OriginDecision::Reject(GuardRejection::DisallowedOrigin),
         );
     }
 
     #[test]
     fn rebound_host_is_rejected() {
-        // DNS-rebinding: the page is evil.example resolving to 127.0.0.1, so the
-        // Host carries the attacker name — it must not match the allowlist.
         let g = guard();
         assert_eq!(
-            g.check_request(&req(&[("Host", "evil.example:3000")])),
+            g.check_request(&req(&[("Host", "evil.example:3000")]), LOOPBACK_PEER),
             OriginDecision::Reject(GuardRejection::DisallowedHost),
         );
     }
@@ -789,10 +854,13 @@ mod tests {
             "",
         );
         assert_eq!(
-            g.check_request(&req(&[
-                ("Host", "genie.local:3000"),
-                ("Origin", "http://genie.local:3000"),
-            ])),
+            g.check_request(
+                &req(&[
+                    ("Host", "genie.local:3000"),
+                    ("Origin", "http://genie.local:3000"),
+                ]),
+                LAN_PEER,
+            ),
             OriginDecision::Allow(Some("http://genie.local:3000".into())),
         );
     }
