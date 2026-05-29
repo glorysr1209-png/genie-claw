@@ -400,13 +400,46 @@ fn searxng_search_url(base_url: &str) -> String {
 }
 
 fn is_local_base_url(base_url: &str) -> bool {
-    let lower = base_url.trim().to_lowercase();
-    lower.starts_with("http://127.")
-        || lower.starts_with("http://localhost")
-        || lower.starts_with("http://[::1]")
-        || lower.starts_with("https://127.")
-        || lower.starts_with("https://localhost")
-        || lower.starts_with("https://[::1]")
+    let url = base_url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return false;
+    }
+
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    // Drop path/query; keep only the authority segment.
+    let authority = stripped.split('/').next().unwrap_or(stripped);
+    // Reject userinfo in the URL (e.g. http://user@127.0.0.1:8888).
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.find(']')
+            .map(|idx| &host_port[..=idx + 1])
+            .unwrap_or(host_port)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+
+    if host == "localhost" {
+        return true;
+    }
+    if host == "::1" || host == "[::1]" {
+        return true;
+    }
+
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(&host);
+    ip_str
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 pub(crate) fn format_results(query: &str, body: &str, limit: usize) -> Result<String> {
@@ -719,9 +752,18 @@ mod tests {
     #[test]
     fn local_base_url_detection_allows_loopback() {
         assert!(is_local_base_url("http://127.0.0.1:8888"));
+        assert!(is_local_base_url("http://127.0.0.2:8888"));
         assert!(is_local_base_url("http://localhost:8888"));
         assert!(is_local_base_url("http://[::1]:8888"));
+        assert!(is_local_base_url("https://127.0.0.1:8888"));
         assert!(!is_local_base_url("https://searx.example.com"));
+    }
+
+    #[test]
+    fn local_base_url_rejects_loopback_looking_suffix_hosts() {
+        assert!(!is_local_base_url("http://127.0.0.1.attacker.com:8888"));
+        assert!(!is_local_base_url("http://localhost.evil.com:8888"));
+        assert!(!is_local_base_url("https://127.0.0.1.nip.io:8888"));
     }
 
     #[test]
