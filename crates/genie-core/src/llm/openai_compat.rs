@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use super::LlmRequestHints;
+use crate::security::sandbox::validate_inference_route;
 
 /// Network timeouts applied to every backend read, write, and connect.
 ///
@@ -354,6 +355,8 @@ impl OpenAiCompatClient {
         request_profile: RequestProfile,
         timeouts: LlmTimeouts,
     ) -> Self {
+        let url = format!("http://{host}:{port}");
+        validate_inference_route(&url).expect("inference route validation failed");
         Self {
             backend_name,
             host: host.to_string(),
@@ -382,6 +385,29 @@ impl OpenAiCompatClient {
     }
 
     pub(crate) fn from_url_with_profile_and_timeouts(
+        backend_name: &'static str,
+        url: &str,
+        request_profile: RequestProfile,
+        timeouts: LlmTimeouts,
+    ) -> Self {
+        Self::build_from_url(backend_name, url, request_profile, timeouts)
+    }
+
+    /// Build a client for a local-only inference endpoint (llama.cpp, genie-ai-runtime).
+    ///
+    /// Enforces [`validate_inference_route`] so misconfigured non-loopback URLs fail at
+    /// startup instead of silently bypassing the documented SSRF guard.
+    pub(crate) fn from_local_url_with_profile_and_timeouts(
+        backend_name: &'static str,
+        url: &str,
+        request_profile: RequestProfile,
+        timeouts: LlmTimeouts,
+    ) -> Self {
+        validate_inference_route(url).expect("inference route validation failed");
+        Self::build_from_url(backend_name, url, request_profile, timeouts)
+    }
+
+    fn build_from_url(
         backend_name: &'static str,
         url: &str,
         request_profile: RequestProfile,
@@ -1310,6 +1336,41 @@ mod tests {
     fn parse_url() {
         let client = OpenAiCompatClient::from_url("test-backend", "http://127.0.0.1:8080/v1");
         assert_eq!(client.host, "127.0.0.1");
+        assert_eq!(client.port, 8080);
+    }
+
+    #[test]
+    fn local_url_factory_accepts_loopback() {
+        let client = OpenAiCompatClient::from_local_url_with_profile_and_timeouts(
+            "test-backend",
+            "http://127.0.0.1:8080/v1",
+            RequestProfile::generic(),
+            LlmTimeouts::default(),
+        );
+        assert_eq!(client.host, "127.0.0.1");
+        assert_eq!(client.port, 8080);
+    }
+
+    #[test]
+    #[should_panic(expected = "inference route rejected")]
+    fn local_url_factory_rejects_non_loopback() {
+        OpenAiCompatClient::from_local_url_with_profile_and_timeouts(
+            "test-backend",
+            "http://10.0.0.1:8080/v1",
+            RequestProfile::generic(),
+            LlmTimeouts::default(),
+        );
+    }
+
+    #[test]
+    fn remote_url_factory_skips_local_validation() {
+        let client = OpenAiCompatClient::from_url_with_profile_and_timeouts(
+            "openai-compatible",
+            "http://provider.example/v1",
+            RequestProfile::generic(),
+            LlmTimeouts::default(),
+        );
+        assert_eq!(client.host, "provider.example");
         assert_eq!(client.port, 8080);
     }
 

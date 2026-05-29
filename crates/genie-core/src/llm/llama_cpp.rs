@@ -22,7 +22,7 @@ impl LlamaCppBackend {
 
     pub fn from_url_with_timeouts(url: &str, timeouts: LlmTimeouts) -> Self {
         Self {
-            inner: OpenAiCompatClient::from_url_with_profile_and_timeouts(
+            inner: OpenAiCompatClient::from_local_url_with_profile_and_timeouts(
                 "llama.cpp",
                 url,
                 RequestProfile::generic(),
