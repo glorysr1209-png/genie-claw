@@ -19,11 +19,28 @@ pub struct BfclCase {
     pub id: String,
     #[serde(default)]
     pub category: Option<String>,
+    #[serde(default)]
+    pub source: Option<BfclCaseSource>,
     pub prompt: String,
     #[serde(default, alias = "expected_calls")]
     pub expected_tool_calls: Vec<ExpectedToolCall>,
     #[serde(default)]
     pub allow_extra_arguments: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BfclCaseSource {
+    pub dataset: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub citation: Option<String>,
+    #[serde(default)]
+    pub derived_from: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +62,7 @@ pub struct BfclPrediction {
 pub struct BfclCaseScore {
     pub id: String,
     pub category: Option<String>,
+    pub source: Option<BfclCaseSource>,
     pub missing_prediction: bool,
     pub parse_success: bool,
     pub tool_name_match: bool,
@@ -171,6 +189,7 @@ fn score_parsed_calls(
         return BfclCaseScore {
             id: case.id.clone(),
             category: case.category.clone(),
+            source: case.source.clone(),
             missing_prediction,
             parse_success: pass,
             tool_name_match: pass,
@@ -236,6 +255,7 @@ fn score_parsed_calls(
     BfclCaseScore {
         id: case.id.clone(),
         category: case.category.clone(),
+        source: case.source.clone(),
         missing_prediction,
         parse_success,
         tool_name_match,
@@ -401,6 +421,7 @@ mod tests {
         BfclCase {
             id: "case-1".to_string(),
             category: Some("unit".to_string()),
+            source: None,
             prompt: "test prompt".to_string(),
             expected_tool_calls,
             allow_extra_arguments: false,
@@ -533,6 +554,42 @@ mod tests {
         assert_eq!(report.strict_matches, 21);
         assert_eq!(report.failure_count, 0);
         assert!((report.strict_accuracy - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn loads_optional_source_metadata_for_license_audit() {
+        let record = r#"{
+            "id": "ha-turn-on-kitchen",
+            "category": "home_control",
+            "source": {
+                "dataset": "Home Assistant Intents",
+                "url": "https://github.com/OHF-Voice/intents",
+                "license": "CC BY 4.0",
+                "citation": "OHF-Voice/intents",
+                "derived_from": "sentences/en/light_HassTurnOn.yaml",
+                "notes": "Converted template sentence with local fixture slots."
+            },
+            "prompt": "turn on the kitchen light",
+            "expected_tool_calls": [
+                {
+                    "name": "home_control",
+                    "arguments": {
+                        "action": "turn_on",
+                        "entity": "kitchen light"
+                    }
+                }
+            ]
+        }"#;
+
+        let case = serde_json::from_str::<BfclCase>(record).unwrap();
+        let source = case.source.expect("source metadata");
+
+        assert_eq!(source.dataset, "Home Assistant Intents");
+        assert_eq!(source.license.as_deref(), Some("CC BY 4.0"));
+        assert_eq!(
+            source.derived_from.as_deref(),
+            Some("sentences/en/light_HassTurnOn.yaml")
+        );
     }
 
     #[test]

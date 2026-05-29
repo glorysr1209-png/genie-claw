@@ -19,6 +19,8 @@ The fixture format is intentionally plain:
   `expected_tool_calls`, and optional `allow_extra_arguments`.
 - `home_tool_predictions.jsonl`: one model response per line with matching
   `id` and `response`.
+- Public-dataset-derived cases may also include `source` metadata with
+  `dataset`, `url`, `license`, `citation`, `derived_from`, and `notes`.
 
 The first suite covers every static built-in tool name from `ToolDispatcher`,
 including home/device calls, memory read/write/diagnostic tools, timers,
@@ -34,3 +36,8 @@ cargo run -p genie-ctl -- bfcl-score \
   --cases tests/bfcl/local/long_home_tool_cases.jsonl \
   --predictions tests/bfcl/local/long_home_tool_predictions.jsonl
 ```
+
+Public data imports must follow [doc/evaluation-data.md](../../doc/evaluation-data.md).
+Do not commit raw public datasets, noncommercial-only audio, private household
+facts, secrets, or large generated suites. Committed public-derived fixtures
+need license and attribution metadata.
