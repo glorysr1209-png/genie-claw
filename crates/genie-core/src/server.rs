@@ -304,11 +304,29 @@ impl RequestRoute<'_> {
                 | RequestRoute::Clear
                 | RequestRoute::WebSearchPost
                 | RequestRoute::ActuationConfirm
+                | RequestRoute::ActuationPending
+                | RequestRoute::ActuationActions
                 | RequestRoute::MemoriesUpdate
                 | RequestRoute::MemoriesDelete
                 | RequestRoute::MemoriesReorder
                 | RequestRoute::OpenAiChat
         )
+    }
+
+    #[cfg(test)]
+    fn requires_local_api_token(&self) -> bool {
+        self.is_mutating()
+    }
+}
+
+#[cfg(test)]
+mod route_token_policy_tests {
+    use super::RequestRoute;
+
+    #[test]
+    fn actuation_status_endpoints_require_local_api_token() {
+        assert!(RequestRoute::ActuationPending.requires_local_api_token());
+        assert!(RequestRoute::ActuationActions.requires_local_api_token());
     }
 }
 
